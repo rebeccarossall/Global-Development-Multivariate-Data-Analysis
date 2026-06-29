@@ -1,0 +1,898 @@
+---
+title: "Global Development Analysis Using Principal Component Analysis"
+author: "Rebecca Rossall"
+date: "`r Sys.Date()`"
+output:
+  pdf_document: default
+  html_document: default
+geometry: margin=0.8in
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+library(patchwork)
+library(GGally)
+library(moments)
+library(MASS)
+library(pls)
+library(glmnet)
+library(corrplot)
+library(factoextra)
+
+UN <- read.csv("UN.csv")
+
+gdp <- UN[,3:14]
+years <- seq(1952, 2007, 5)
+colnames(gdp) <- years
+rownames(gdp) <- UN[,2]
+
+log_gdp <- log(gdp)
+
+lifeExp <- UN[,15:26]
+colnames(lifeExp) <- years
+rownames(lifeExp) <- UN[,2]
+
+popn <- UN[,27:38]
+colnames(popn) <- years
+rownames(popn) <- UN[,2]
+
+data_mean <- data.frame(
+  gdp = rowMeans(gdp),
+  life = rowMeans(lifeExp),
+  continent = UN$continent
+)
+rownames(data_mean) <- UN$country
+
+#GDP data set
+#Makes years a column and gdp a column
+gdp_long <- data.frame(country = rownames(gdp), gdp) %>%
+  pivot_longer(
+    cols = -country,
+    names_to = "year",
+    values_to = "gdp"
+  )
+
+gdp_long$year <- as.numeric(sub("X", "", gdp_long$year))
+
+#Adds in continent to each country
+gdp_long$continent <- rep(UN$continent, each = length(years))
+
+#Mean continent gdp
+gdp_avg <- gdp_long %>%
+  group_by(continent, year) %>%
+  summarise(mean_gdp = mean(gdp, na.rm = TRUE), .groups = "drop")
+
+#Log(gdp) for later
+gdp_long$log_gdp <- log(gdp_long$gdp)
+
+
+
+
+#Life expectancy data set
+#Makes years and life expectancy the columns
+life_long <- data.frame(country = rownames(lifeExp), lifeExp) %>%
+  pivot_longer(
+    cols = -country,
+    names_to = "year",
+    values_to = "lifeExp"
+  )
+
+life_long$year <- as.numeric(sub("X", "", life_long$year))
+
+#Classify countries to continents
+life_long$continent <- rep(UN$continent, each = length(years))
+
+#Continent averages
+life_avg <- life_long %>%
+  group_by(continent, year) %>%
+  summarise(mean_life = mean(lifeExp, na.rm = TRUE))
+
+
+
+#Population data set
+#Converts columns to be years and population
+pop_long <- data.frame(country = rownames(popn), popn) %>%
+  pivot_longer(
+    cols = -country,
+    names_to = "year",
+    values_to = "pop"
+  )
+
+pop_long$year <- as.numeric(sub("X", "", pop_long$year))
+#Allocates continent for each country
+pop_long$continent <- rep(UN$continent, each = length(years))
+
+#Finds continent averages
+pop_avg <- pop_long %>%
+  group_by(continent, year) %>%
+  summarise(mean_pop = mean(pop, na.rm = TRUE))
+
+#Setting up 2007 dataset for pairwise plot
+data_2007 <- data.frame(
+  country = rownames(gdp),
+  continent = UN$continent,
+  gdp = as.numeric(gdp[, "2007"]),
+  life = as.numeric(lifeExp[, "2007"]),
+  pop = as.numeric(popn[, "2007"])
+)
+
+data_2007 <- na.omit(data_2007)
+
+data_2007$log_gdp <- log(data_2007$gdp)
+data_2007$log_pop <- log(data_2007$pop)
+
+```
+
+This project analyses the dataset of three variables: GDP (Gross Domestic Product per capita), life expectancy, and population across 141 countries spanning the years 1952 to 2007. 
+
+
+## Exploratory Data Analysis
+
+Exploratory data analysis was conducted to examine the behaviour of the three variables GDP, life expectancy, and population over the 55-year period. 
+
+To examine long-term economic patterns, a time-series plot of GDP was constructed, showing individual countries and continental averages over time, highlighting global trends and regional differences.
+
+```{r gdp-time-series, fig.width=6, fig.height=3.5, echo=FALSE, message=FALSE, warning=FALSE}
+ggplot() +
+  geom_line(data = gdp_long,
+            aes(year, gdp, group = country, colour = continent),
+            alpha = 0.2) +
+  geom_line(data = gdp_avg,
+            aes(year, mean_gdp, colour = continent),
+            linewidth = 1.2) +
+  labs(
+    title = "GDP over Time with Continent Averages",
+    x = "Year",
+    y = "GDP per capita"
+  ) +
+  theme_minimal()
+```
+
+A time series plot of GDP shows an overall increase across all continents, consistent with global economic growth. However, there are substantial differences between continents, with Africa consistently recording low GDP and slower growth than other regions. In contrast, Oceania displays the highest GDP levels and the steepest growth, closely followed by Europe, which also shows steady increases. Despite the Americas starting with slightly higher GDP than Asia, Asia demonstrates faster growth and eventually surpasses the Americas. These patterns highlight persistent economic inequalities between continents. Furthermore, the distribution of countries across continents suggests considerable variability within each continent, indicating that countries within the same continent can exhibit substantially different economic trajectories.
+
+To examine how life expectancy has evolved over time and compare health outcomes across regions, a time series plot was constructed, depicting individual countries and continent-level averages.
+
+```{r life-time-series, fig.width=6, fig.height=3.5, echo=FALSE, message=FALSE, warning=FALSE}
+
+ggplot() +
+  geom_line(data = life_long,
+            aes(year, lifeExp, group = country, colour = continent),
+            alpha = 0.2) +
+  geom_line(data = life_avg,
+            aes(year, mean_life, colour = continent),
+            linewidth = 1.2) +
+  labs(title = "Life Expectancy over Time with Continent Averages",
+       x = "Year",
+       y = "Life Expectancy") +
+  theme_minimal()
+```
+
+The time-series plot of life expectancy shows an overall increase across all continents. This closely mirrors the trends observed in GDP, with higher life expectancy generally observed in more developed regions. Oceania exhibits the highest life expectancy, closely followed by Europe, with both regions experiencing steady increases. The Americas and Asia follow, as the gap between these four continents narrows over time. However, Africa consistently has the lowest life expectancy, despite steady increases, with the gap between Africa and other continents remaining substantial. This reflects continued global improvements in life expectancy alongside significant regional disparities. Compared with GDP, within-continent variation appears smaller, suggesting that life expectancy is more consistent and evenly distributed across countries than GDP.
+
+
+A time series plot was constructed to examine how population has evolved across different countries, alongside average continent levels.
+
+```{r population-time-series, fig.width=6, fig.height=3.5, echo=FALSE, message=FALSE, warning=FALSE}
+ggplot() +
+  geom_line(data = pop_long,
+            aes(year, pop, group = country, colour = continent),
+            alpha = 0.2) +
+  geom_line(data = pop_avg,
+            aes(year, mean_pop, colour = continent),
+            linewidth = 1.2) +
+  labs(title = "Population over Time with Continent Averages",
+       x = "Year",
+       y = "Population") +
+  theme_minimal()
+```
+
+
+The population plot shows an overall increase across all continents, indicating global growth. Asia has the largest average population across time, with a notable gap compared to other continents. The Americas show steady growth, while Europe shows a gradual rise, and Oceania exhibits a modest increase, yet consistently records the lowest population levels. However, the data's scale is heavily influenced by a few highly populated countries, particularly two in Asia (China and India), which dominate the scale, compressing continents such as Africa near the x-axis and making it difficult to distinguish. This makes it challenging to meaningfully compare continental variations, underscoring the need to explore the distribution and consider suitable transformations.
+
+To explore the distribution and spread of GDP over time, a histogram was constructed.
+
+```{r gdp-histograms,fig.height=3.5, echo=FALSE, message=FALSE, warning=FALSE}
+
+p1 <- ggplot(gdp_long, aes(x = gdp)) +
+  geom_histogram(bins = 40) +
+  labs(title = "Distribution of GDP", x = "GDP")
+
+p2 <- ggplot(gdp_long, aes(x = log_gdp)) +
+  geom_histogram(bins = 40) +
+  labs(title = "Distribution of log(GDP)", x = "log(GDP)")
+
+p1 + p2
+
+```
+
+An inspection of the distribution of GDP revealed a skewness of 1.88, indicating a strong positive skew, as shown in the histogram. This suggests that most countries have low GDPs, with only a few having high GDPs. Applying a log transformation produces a more symmetric distribution, reducing skewness to 0.08. This prevents extreme GDP values from dominating the analysis and improves the stability of subsequent analyses.
+
+Life expectancy exhibits a near-symmetric distribution with a skewness of -0.24, indicating only a slight negative skew and suggesting that no transformations are necessary. This suggests that life expectancy values are relatively evenly distributed, consistent with the uniform trends observed in the time-series plot.
+
+The time series plot for population revealed a small number of countries with substantially larger populations than others, motivating investigation of the distribution and the influence of these extreme values using a histogram.
+
+```{r population-histograms,fig.height=3.5, echo=FALSE, message=FALSE, warning=FALSE}
+
+pop_long$log_pop <- log(pop_long$pop)
+
+p3 <- ggplot(pop_long, aes(x = pop)) +
+  geom_histogram(bins = 40) +
+  labs(title = "Distribution of Population", x = "Population") 
+
+
+p4 <- ggplot(pop_long, aes(x = log_pop)) +
+  geom_histogram(bins = 40) +
+  labs(title = "Distribution of log(Population)",x = "log(Population)")
+
+p3 + p4
+
+```
+
+
+The population distribution is heavily right-skewed, with a skewness of 8.30, indicating that very few countries are highly populated. A log transformation reduces the effects of extreme values, resulting in a skewness of 0.08. This produces a more symmetric distribution, allowing for a more accurate examination of overall population trends.
+
+This similarity in trends found between GDP and life expectancy in the time series plots suggests a strong positive association between economic development and health outcomes, motivating further exploration of this relationship. To investigate this, the variables were plotted in a pairs plot using data from 2007, providing a consistent and recent comparison across countries. GDP and population were log-transformed to reduce the influence of extreme values and provide a more meaningful comparison between variables.
+
+
+```{r Pairwise-Correlation-Plots,echo=FALSE, message=FALSE, warning=FALSE}
+ggpairs(
+  data_2007,
+  columns = c("log_gdp", "life", "log_pop"),
+  columnLabels = c("log(GDP)", "Life Expectancy", "log(Population)"),
+  upper = list(continuous = wrap("cor", size = 3))
+) +
+  ggtitle("Pairwise Relationships for 2007")
+```
+
+The pairs plot suggests a strong positive relationship between log(GDP) and life expectancy, with a correlation of 0.809, consistent with the trends observed in the time series plots. This indicates that when a country's GDP is higher, its life expectancy tends to be higher as well. The relationships between log(Population) and log(GDP) are weak, as are those between log(Population) and life expectancy, with respective correlations of -0.035 and 0.072, suggesting that a country's population size is not strongly associated with differences in GDP or life expectancy.
+
+
+## Principal Component Analysis
+Since each variable is recorded at 12 time points for each country, interpreting and visualising trends can be complex. To address this, PCA (Principal Component Analysis) is employed to reduce dimensionality and identify temporal patterns using fewer components. 
+
+The variance of GDP varies considerably across years, from about 8.7 million in 1952 to 157 million in 2007. This increasing variance reflects the upward trend in GDP observed in the time-series plots. 
+
+The variance in life expectancy also fluctuates over the years but remains much more stable than GDP, ranging from approximately 111 to 151. This indicates greater consistency in variability and outcomes across countries over time. 
+
+For GDP and life expectancy, the variables (years) are standardised to have a mean of zero and a standard deviation of one. PCA is conducted using the correlation matrix, ensuring each year contributes equally to the analysis despite differences in variance. The resulting principal components are linear combinations of the original variables, with eigenvalues representing the proportion of variance explained, and eigenvectors indicating the component loadings. This allows for underlying temporal structures to be identified and interpreted in a lower-dimensional space.
+
+A scree plot is created, with each principal component plotted alongside the proportion of variance it explains, to identify the leading principal components.
+
+```{r PCA-Scree-Plots-GDP,fig.height=3.5, echo=FALSE, message=FALSE, warning=FALSE}
+
+# PCA performed using correlation matrix
+pca_gdp <- prcomp(gdp, scale. = TRUE)
+var_explained <- pca_gdp$sdev^2 / sum(pca_gdp$sdev^2)
+
+plot(var_explained, type = "b",
+     xlab = "Principal Component",
+     ylab = "Proportion of Variance Explained",
+     main = "Scree Plot for GDP")
+```
+
+
+For GDP, the first principal component (PC1) explains 91.8% of the total variation, while the second principal component (PC2) explains 5.3%, whereas all remaining components explain less than 2% of variation. The scree plot shows a sharp decline after PC1, followed by a clear flattening after PC2, indicating that most of the data's variation is captured by PC1 and that only marginal gains are achieved beyond PC2. Together, PC1 and PC2 account for 97.1% of the total variance, which is sufficient to capture the data's underlying structure, and therefore, only the first two principal components are retained.
+
+The loadings for PC1 are very similar across years, ranging from -0.28 to -0.29, indicating that each year contributes equally to PC1. The loadings for PC2 begin positive at 0.39 in 1952, slowly decrease to negative in 1982, and steadily decrease to -0.41 in 2007, indicating a contrast in GDP values over time and capturing differences in economic growth.
+
+The following plot displays each PC1 score, which represents each country's overall level of GDP (average wealth), alongside each PC2 score, which represents differences in growth patterns over time. 
+
+```{r PC1-vs-PC2-GDP,fig.height=3.5, echo=FALSE, message=FALSE, warning=FALSE}
+
+gdp_scores <- as.data.frame(pca_gdp$x)
+
+# Add country names and continent for plotting
+gdp_scores$country <- rownames(gdp)
+gdp_scores$continent <- UN$continent
+
+ggplot(gdp_scores, aes(PC1, PC2, colour = continent)) +
+  geom_point() +
+  geom_text(aes(label = country), size = 2, vjust = 1.5, check_overlap = TRUE) +
+  labs(title = "PCA of GDP",
+       x = "PC1 - Overall GDP level",
+       y = "PC2 - GDP growth pattern") +
+  theme_minimal()
+```
+
+The countries at one end of the PC1 axis of the graph exhibit high GDP, mostly European and Oceania countries, with minimal variation, indicating similar levels of wealth. In contrast, countries at the opposite end of the axis exhibit low GDP, mostly African countries.
+
+The Americas are mostly concentrated towards the end of the axis, reflecting higher GDP, whereas Asian countries are distributed on both sides of the graph, indicative of greater GDP variability and thus higher wealth inequality within this continent. 
+
+The variation along the PC2 axis is comparatively small, indicating that growth patterns play a lesser role in the structure of this data, while overall GDP levels are a dominant feature.
+
+A scree plot for life expectancy is constructed by plotting each principal component against the proportion of variance explained, to identify the principal components that capture the most variation in life expectancy.
+
+```{r PCA-Scree-Plots-Life,fig.height=3.5, echo=FALSE, message=FALSE, warning=FALSE}
+
+# PCA using correlation matrix
+pca_life <- prcomp(lifeExp, scale. = TRUE)
+
+var_explained_life <- pca_life$sdev^2 / sum(pca_life$sdev^2)
+
+plot(var_explained_life, type = "b",
+     xlab = "Principal Component",
+     ylab = "Proportion of Variance Explained",
+     main = "Scree Plot for Life Expectancy")
+
+```
+
+The scree plot shows that 92.3% of the variation in life expectancy is explained by PC1, which captures overall life expectancy levels across countries, and 5.6% by PC2, which captures differences in earlier and later life expectancy values over time. This is evidenced by the sharp decline after PC1 and the plateau after PC3, which account for at most 1.3% of the variation and provide negligible additional information. Seeing as PC1 and PC2 explain 97.9% of the variation, using only these two provides sufficient information about the data structure, with information from the remaining PCs comparatively insignificant.
+
+The loadings for PC1 are very similar across years, ranging from approximately 0.27 to 0.30, indicating that each year contributes equally to PC1 and that PC1 represents overall life expectancy levels. The loadings for PC2 begin positive at 0.34 in 1952 and decrease steadily to -0.45 in 2007, indicating a contrast in life expectancy values over time and therefore capturing how life expectancy has evolved across countries.
+
+A plot of PC1 and PC2 values based on life expectancy was constructed, displayed for each country. 
+
+```{r PC1-vs-PC2-Plots-Life,fig.height=3.5, echo=FALSE, message=FALSE, warning=FALSE}
+life_scores <- as.data.frame(pca_life$x)
+
+life_scores$country <- rownames(lifeExp)
+life_scores$continent <- UN$continent
+
+ggplot(life_scores, aes(PC1, PC2, colour = continent)) +
+  geom_point() +
+  geom_text(aes(label = country), size = 2, vjust = 1.5, check_overlap = TRUE) +
+  labs(title = "PCA of Life Expectancy",
+       x = "PC1 - Overall life expectancy level",
+       y = "PC2 - Life expectancy growth pattern") +
+  theme_minimal()
+```
+
+The plot shows a clustering of European and Oceania countries at one end of the PC1 axis, with minimal spread, indicating that European countries consistently exhibit higher life expectancies. The Americas are predominantly on this side of the axis, but with much greater variation and a larger disparity in life expectancy, suggesting greater inequality within the Americas. Asian countries span a wide range, with the largest variation in PC1 indicating substantial differences in life expectancy. Africa shows a more consistent pattern, with its countries predominantly on the opposite side of the axis, indicating lower average life expectancy, although some spread remains, supporting the idea that Africa exhibits greater variation in life expectancy. 
+
+The PC2 axis shows comparatively little variation across countries, indicating that PC1 is the primary component in this data. Dispersion along the PC2 axis suggests that, despite similar life expectancy levels, countries exhibit different growth patterns over time, with Asia and Africa showing more varied and consistently larger PC2 values than Europe and Oceania.
+
+To further examine the relationship between overall GDP and life expectancy, the first principal components for each were plotted.
+
+
+```{r PC1-vs-PC1-GDP-Life,fig.height=3.5, echo=FALSE, message=FALSE, warning=FALSE}
+combined_scores <- data.frame(
+  GDP_PC1 = gdp_scores$PC1,
+  Life_PC1 = life_scores$PC1,
+  country = rownames(gdp),
+  continent = UN$continent
+)
+
+ggplot(combined_scores, aes(GDP_PC1, Life_PC1, colour = continent)) +
+  geom_point() +
+  geom_text(aes(label = country), size = 2, vjust = 1.5, check_overlap = TRUE) +
+  labs(title = "PC1 for GDP vs PC1 for Life Expectancy",
+       x = "PC1 of GDP - Overall GDP level",
+       y = "PC1 of life expectancy - Overall life expectancy level"
+       ) +
+  theme_minimal()
+```
+
+
+The plot of PC1 for GDP against PC1 for life expectancy reveals a clear positive relationship: higher overall life expectancy correlates with higher GDP. The prominent clustering of Oceania and European countries around this area indicates a strong link between economic prosperity and life expectancy. Although this graph shows a slight curvature, it is likely due to variation between countries, rather than a genuine non-linear relationship between GDP and life expectancy.
+
+The plot also shows that lower life expectancy is associated with lower GDP, as observed in many African countries, though the relationship is weaker due to greater dispersion. The Americas remain relatively dispersed but show slight clustering around higher life expectancy and GDP, consistent with the general trend that countries with higher life expectancy tend to have higher GDP. Asian countries remain dispersed and varied, though a weak positive relationship can be observed: countries with higher life expectancy tend to have higher GDP, and vice versa. Overall, this suggests that countries with greater economic prosperity tend to have better health outcomes, while those with lower GDP typically experience worse health outcomes and consequently lower life expectancy.  
+
+To conclude, PCA shows that most variation across countries is explained by overall economic and health levels (captured by PC1), and temporal growth patterns (captured by PC2) contribute comparatively less.
+
+## Canonical Correlation Analysis
+
+After identifying differences in scale and variance between GDP and life expectancy, and observing skewness in GDP during exploratory analysis, log-transforming GDP improves symmetry and comparability between variables. This enables a more precise comparison and examination of structure and relationships through canonical correlation analysis (CCA), in which linear combinations for the variables in each set, log(GDP) and life expectancy, are derived. The linear combinations of these variables are determined to maximise their correlation and to explore the underlying relationship between wealth and health outcomes.
+
+As the variance of log(GDP) ranges from approximately 0.96 to 1.82, which differs substantially from the variance of life expectancy, ranging from approximately 111 to 151, both data sets were standardised to have a mean of zero and a standard deviation of one.  This ensures comparability across variables. CCA is then performed on standardised variables to prevent variables with larger variances from disproportionately influencing the analysis. 
+
+The first pair of canonical correlation variables is plotted to show the relationship between log(GDP) and life expectancy.
+
+```{r CCA,fig.height=3.5, echo=FALSE, message=FALSE, warning=FALSE}
+
+# Standardise variables
+X <- scale(as.matrix(log_gdp))        
+Y <- scale(as.matrix(lifeExp))
+
+#Performs cca
+cca_model <- cancor(X, Y) 
+
+corr1 <- cca_model$cor[1]
+
+U <- X %*% cca_model$xcoef
+V <- Y %*% cca_model$ycoef
+
+cca_scores <- data.frame(
+  U1 = U[, 1],
+  V1 = V[, 1],
+  country = rownames(gdp),
+  continent = UN$continent
+)
+
+ggplot(cca_scores, aes(x = U1, y = V1, colour = continent)) +
+  geom_point(size = 2) +
+  geom_text(aes(label = country), size = 2, vjust = 1.5, check_overlap = TRUE) +
+  labs(
+    title = "The First Pair of Canonical Variables",
+    x = "The first canonical variable for log(GDP)",
+    y = "The first canonical variable for life expectancy"
+  ) +
+  theme_minimal()
+
+```
+The first pair of canonical variables captures overall economic and health development, and the plot shows a clear positive relationship between log(GDP) and life expectancy, with a correlation of 0.93. This indicates that countries with high GDP are associated with high life expectancy, while those with low GDP are associated with low life expectancy. African countries cluster at the lower end of the plot, reflecting low GDP and low life expectancy, while Europe and Oceania cluster at the upper end, associated with high levels of both variables. Asia and the Americas display a greater spread, indicating a wider range of health and wealth across countries in these regions. This pattern is consistent with previous analysis.
+
+The first canonical correlation is substantially larger than the subsequent ones, with the next at 0.51, indicating that most of the relationship is captured by the first canonical pair, and the other pairs capture weaker patterns of association.
+
+Using non-transformed GDP yields a first canonical correlation of 0.89, indicating a strong positive relationship with life expectancy. The transformed GDP shows a slightly stronger correlation, revealing a clearer relationship, as the log transformation addresses the skew of GDP and reduces the influence of extreme values.
+
+
+
+## Multidimensional Scaling
+
+Multidimensional Scaling (MDS) is used to visualise the similarities between countries by mapping their pairwise distances. The variables log(GDP), life expectancy, and log(Population) are standardised to address differences in scale before pairwise Euclidean distances are computed, and then classical MDS is applied to generate a plot. 
+
+The following plot shows each country as a point in low-dimensional space, so that distances between points reflect similarities in the data.
+
+
+```{r MDS,fig.height=3.5, echo=FALSE, message=FALSE, warning=FALSE}
+
+
+# dataset
+UN.transformed <- cbind(log(UN[,3:14]), UN[,15:26], log(UN[,27:38]))
+
+# Standardise variables
+UN.scaled <- scale(UN.transformed)
+
+# distance matrix
+dist_mat <- dist(UN.scaled)
+
+# classical MDS (2D)
+mds <- cmdscale(dist_mat, k = 2)
+
+#  dataframe for plotting
+mds_df <- data.frame(
+  Dim1 = mds[,1],
+  Dim2 = mds[,2],
+  country = UN[,2],
+  continent = UN[,1]
+)
+
+# Plot
+ggplot(mds_df, aes(Dim1, Dim2, colour = continent)) +
+  geom_point(size = 2) +
+  geom_text(aes(label = country),
+            size = 2,
+            vjust = 1.5,
+            check_overlap = TRUE) +
+  labs(
+    title = "Multidimensional Scaling Plot of Countries",
+    x = "First coordinate",
+    y = "Second coordinate"
+  ) +
+  theme_minimal()
+
+```
+
+This plot shows that points which are closer together are more similar in GDP, life expectancy, and population, while those further apart are less similar in these variables. European and Oceania countries are clustered closely, reflecting similar socio-economic properties, as supported by PCA and CCA, which show shared high GDP and life expectancy. The MDS plot captures this structure, suggesting that these variables collectively contribute to similarities between countries.
+
+African countries are also somewhat close to one another, indicating comparable low values in these variables, but are generally situated far from countries with higher GDP and life expectancy, highlighting significant disparities in economic and health outcomes. Asian and American countries exhibit greater dispersion, consistent with PCA and CCA, suggesting greater variability in wealth and health.
+
+Overall, countries that are closer together in the MDS plot have similar socio-economic characteristics, and consistent patterns observed across PCA, CCA and MDS reinforce the trends and underlying global development structure identified in the data. 
+
+## Linear Discriminant Analysis
+
+Linear Discriminant Analysis (LDA) was applied to build a model predicting each country's continent based on GDP, life expectancy, and population data from 1952 to 2007.  As the variables were measured on vastly different scales and showed differing variances (as found in Question 1), all predictors are standardised prior to any analysis. 
+
+LDA constructs linear combinations that maximise between-continent variation relative to the within-continent variation. The dataset was randomly split into 70% training and 30% for testing to evaluate predictive performance. The first two linear discriminants are plotted below; LD1 reflects overall economic and health development, and LD2 reflects more subtle continental differences. 
+
+```{r LD1-vs-LD2,fig.height=3.5, echo=FALSE, message=FALSE, warning=FALSE}
+
+X_lda <- scale(cbind(gdp, lifeExp, popn))
+
+lda_df <- data.frame(
+  continent = as.factor(UN$continent),
+  X_lda
+)
+
+countries <- UN$country
+
+set.seed(1)
+
+n <- nrow(lda_df)
+train_index <- sample(1:n, size = floor(0.7 * n))
+
+train_data <- lda_df[train_index, ]
+test_data  <- lda_df[-train_index, ]
+
+test_countries <- countries[-train_index]
+
+# Fit LDA
+lda_train <- lda(continent ~ ., data = train_data)
+
+
+# Predict on test data
+lda_pred <- predict(lda_train, newdata = test_data)
+
+# Plot test set scores
+lda_scores_test <- data.frame(
+  LD1 = lda_pred$x[,1],
+  LD2 = lda_pred$x[,2],
+  Predicted = lda_pred$class,
+  Actual = test_data$continent,
+  country = test_countries
+)
+
+ggplot(lda_scores_test, aes(LD1, LD2, colour = Actual)) +
+  geom_point(size = 2) +
+  geom_text(aes(label = country), size = 2, vjust = 1.5, check_overlap = TRUE) +
+  labs(
+    title = "LDA Projection of Test Data (LD1 vs LD2)",
+    x = "Linear Discriminant 1 (LD1)",
+    y = "Linear Discriminant 2 (LD2)"
+  ) +
+  theme_minimal()
+
+```
+
+The plot visualises how well separated continents are in two dimensions, with the first linear discriminant (LD1) axis showing clear separation. Countries from the same continent generally cluster together on one side of the axis, particularly for Oceania and Europe, while African countries are relatively clustered on the other side. Asian and American countries remain relatively spread out, but there is much more overlap, indicating that these continents share similar economic prosperity, population, and health outcomes.
+
+The first linear discriminant accounts for approximately 91% of the variation between groups, indicating that it captures most of the separation between continents, strengthening the graphs’ findings.
+
+The second linear discriminant (LD2) axis shows minimal separation between groups, as expected, given that it accounts for only 6.3% of the variation between continents, indicating that it contributes minimal additional information.
+
+The resulting confusion matrix summarises the classification performance by predicting which continent each country in the test set belongs to.
+
+```{r Confusion-Matrix, echo=FALSE, message=FALSE, warning=FALSE}
+# Confusion matrix
+table(Predicted = lda_pred$class, Actual = test_data$continent)
+
+# Accuracy
+accuracy <- mean(lda_pred$class == test_data$continent)
+accuracy
+
+```
+
+The resulting accuracy of 60.5% indicates moderate predictive performance. The confusion matrix shows that Africa and Europe are well classified, whereas there is considerable overlap between Asia and the Americas, consistent with earlier PCA and CCA results. Oceania is poorly classified, likely due to the small sample size, which makes it difficult for this model to reliably capture and distinguish its characteristics. This suggests that LDA captures broad global socio-economic patterns, but accurate continent-level classification is challenging due to substantial variation and overlap between continents.
+
+
+## Clustering
+
+This section examines the dataset's properties and aims to categorise countries into clusters with similar socio-economic characteristics based on GDP and life expectancy. Prior to cluster analysis, GDP and life expectancy were standardised because they have very different scales and variances, ensuring equal contributions to distance calculations. 
+
+A distance matrix was then constructed, with each entry representing the distance between a pair of countries. Hierarchical clustering was applied, starting with each country as its own cluster and iteratively merging clusters. Three different linkage methods were used: single, complete and average linkage. 
+
+The single linkage method produces a chaining structure, resulting in a long, stretched hierarchy rather than clearly defined clusters. This method is difficult to interpret, making it challenging to identify meaningful clusters, underscoring its key limitation: poor separation. Consequently, it is not suitable for estimating an appropriate number of clusters.
+
+The complete linkage clustering was visualised using a dendrogram.
+
+
+```{r Complete-Linkage-Dengrogram,fig.height=3.5, echo=FALSE, message=FALSE, warning=FALSE}
+
+UN.scaled <- UN[,1:26]
+UN.scaled[,3:26] <- scale(UN[,3:26])
+
+# Use ONLY numeric columns for clustering
+X_scaled <- UN.scaled[,3:26]
+
+dist_mat <- dist(X_scaled)
+
+hc_complete <- hclust(dist_mat, method = "complete")
+
+
+plot(hc_complete, labels=FALSE,
+     main = "Complete Linkage Dendrogram",
+     xlab = "Countries",
+     ylab = "Height")
+```
+
+The complete linkage method shows clear, large vertical jumps, indicating separations into a few groups and suggesting well-separated, compact clusters. This produces a structure that is easier to interpret compared to the single linkage method. Notably, there is a significant jump to three clusters, indicating that three could be an appropriate number. Alternatively, the jump to four more evenly sized clusters may also be suitable.
+
+The average linkage clustering was visualised using a dendrogram.
+
+```{r AverageLinkage-Dengrogram,fig.height=3.5, echo=FALSE, message=FALSE, warning=FALSE}
+
+
+hc_average  <- hclust(dist_mat, method = "average")
+
+plot(hc_average, labels=FALSE,
+     main = "Average Linkage Dendrogram",
+     xlab = "Countries",
+     ylab = "Height")
+
+
+```
+
+The average linkage method results in clearer grouping, with less extreme jumps and more gradual merging, providing a compromise between the two methods. It maintains reasonable separation while avoiding the chaining effect seen with single linkage. There is a distinct jump at three clusters, suggesting that this number could be appropriate.
+
+However, the large number of countries makes the dendrograms difficult to interpret across all linkage methods, with the single linkage method dendrogram remaining inconclusive. The complete and average linkage methods provide a baseline for clustering and provide an overall informative structure, though limited; they both indicated that 3 clusters may be appropriate.
+
+Ward's method minimises within-cluster variance and was applied to produce the following dendrogram, providing an alternative view on the cluster structure.
+
+```{r Ward-Dengrogram,fig.height=3.5, echo=FALSE, message=FALSE, warning=FALSE}
+
+
+hc_ward <- hclust(dist_mat, method = "ward.D2")
+plot(hc_ward, labels = FALSE,
+     main = "Ward's Method Dendrogram",
+     xlab = "Countries")
+```
+
+
+This dendrogram shows a split from three to four key clusters, suggesting a four-cluster structure is plausible and that an intermediate group may have a further subdivision. However, the separation into three clusters remains prominent and is consistently supported by complete and average linkage methods.
+
+To further examine the appropriate number of clusters, an elbow plot based on k-means clustering was constructed.
+
+```{r Elbow-Plot,fig.height=3.5, echo=FALSE, message=FALSE, warning=FALSE}
+
+set.seed(1)
+
+fviz_nbclust(X_scaled, kmeans, method = "wss")
+
+```
+
+The plot shows a clear reduction in variability up to k = 3; after this, the rate of decrease slows and plateaus. Although there is a reasonable decrease in the total within sum of squares between k=2 and k=3, beyond k=3 there is little improvement. Based on this, k-means clustering with k=3 clusters was applied. Countries are partitioned across the three clusters by assigning each country to the nearest cluster centroid, and the centroids are iteratively updated to minimise within-cluster variation. 
+
+K-means clustering with k=3 was applied and visualised using MDS, along with a table displaying how many countries from each continent make up each clusters.
+
+```{r K-means-plot,fig.height=3.5, echo=FALSE, message=FALSE, warning=FALSE}
+
+set.seed(1)
+kmeans_res <- kmeans(X_scaled, centers = 3, nstart = 20)
+
+mds_cluster <- cmdscale(dist_mat, k = 2)
+
+cluster_df <- data.frame(
+  Dim1 = mds_cluster[, 1],
+  Dim2 = mds_cluster[, 2],
+  cluster = as.factor(kmeans_res$cluster),
+  continent = UN$continent,
+  country = UN$country
+)
+
+ggplot(cluster_df, aes(Dim1, Dim2, colour = cluster)) +
+  geom_point(size = 2) +
+  labs(title = "K-means Clustering using MDS",
+       x = "MDS coordinate 1",
+       y = "MDS coordinate 2") +
+  theme_minimal()
+
+cluster_table <- cluster_df %>%
+  count(cluster, continent) %>%
+  pivot_wider(names_from = continent, values_from = n, values_fill = 0)
+
+cluster_table <- cluster_table[order(cluster_table$cluster), ]
+
+knitr::kable(
+  cluster_table,
+  digits = 0,
+  caption = "Number of Countries from Each Continent Within Clusters"
+)
+
+
+```
+
+The resulting plot shows one group with consistently low life expectancy and low GDP, likely representing African countries. There is one group with moderate GDP and life expectancy, likely representing the countries in the Americas and Asia, and a final group with high GDP and life expectancy, likely representing European and Oceania countries.
+
+The clusters show clear separation, particularly between developed and developing regions, and reflect overall similarities across all years, as the plot is based on MDS. This suggests that countries generally group by similar levels of economic prosperity and health outcomes. In particular, the extremes of very underdeveloped and very developed regions tend to group together, as do continental groupings.  
+
+When k=3, the proportion of variance explained is approximately 76.7%. Increasing the number of clusters to k=4 increases the explained variation to 81.7%. Although this increase in the number of clusters results in more variance explained, the improvement is minimal, so k=3 clusters are preferred for their balance of parsimony and explanatory power.
+
+
+Overall, both hierarchical and k-means clustering suggest three clusters are appropriate, indicating an underlying structural separation by levels of economic development. Although Ward’s method largely agrees with the three clusters, it suggests that four clusters may be appropriate, reflecting a further subdivision of an intermediate group. A limitation of this analysis is that it focuses on GDP and life expectancy, overlooking population, potentially failing to capture the true structure of the data.
+
+
+```{r regression-split, include=FALSE}
+set.seed(1)
+
+Xraw <- as.data.frame(gdp)
+Xlog <- as.data.frame(log(gdp))
+
+y <- lifeExp[, "2007"]
+countries <- rownames(gdp)
+
+n <- nrow(gdp)
+train_index <- sample(1:n, size = floor(0.7 * n))
+
+Xraw_train <- Xraw[train_index, ]
+Xraw_test  <- Xraw[-train_index, ]
+
+Xlog_train <- Xlog[train_index, ]
+Xlog_test  <- Xlog[-train_index, ]
+
+y_train <- y[train_index]
+y_test  <- y[-train_index]
+
+country_test <- countries[-train_index]
+```
+
+
+## Linear Regression
+
+In this section, life expectancy in 2007 will be modelled using data from GDP or log(GDP) over the past 55 years as the predictor.  The dataset is split into 70% for training and 30% for testing to evaluate the predictive performance of the models, with predictive accuracy assessed using RMSE and $R^2$. 
+
+Modelling began with Ordinary Least Squares (OLS), where raw GDP over 55 years was used as the predictor for Model 1, and log(GDP) for Model 2.  Model 1 attained a relatively low $R^2$ of 0.24 and an RMSE of 10.09, compared with Model 2, which had an $R^2$ of 0.45 and an RMSE of 8.60. This indicates that Models 1 and 2 explained only 24% and 45% of the variation, respectively. This increase indicates that log(GDP) is a significantly more reliable predictor of life expectancy, as it decreases skewness and stabilises variance, thus linearising its relationship with life expectancy.
+
+Although the explanatory power remains limited within the OLS models, which is likely due to the predictors of GDP across years being strongly correlated, with correlations ranging from 0.79 to 1.00 and a mean of approximately 0.91. This substantial multicollinearity leads to unstable OLS coefficient estimates with high variance, underscoring the need to consider alternative models.  
+
+Seeing as there is only one output variable, which is life expectancy in 2007, there is no advantage in considering the multi-output linear model, as it treats each response independently, so the prediction for 2007 would be identical to that from an ordinary linear regression.
+ 
+Principal component regression (PCR) addresses multicollinearity by replacing the variables with uncorrelated components, by first performing PCA and then using the resulting principal components in linear regression. Previous PCA analysis found that the first principal component explains 91.8% of the variance in GDP, and the first two principal components together explain 97.1%, indicating that most of the information in the GDP predictors can be captured with very few components, further supporting the use of PCR. 
+
+Modelling PCR found the optimal number of principal components retained for Model 3 using raw GDP was 9, compared to only 3 for Model 4, which uses log(GDP). This suggests that the transformed data provide a more efficient representation of the data structure and information, with less noise and redundancy.
+
+Model 3 achieved an improved RMSE of 9.31 and $R^2$ of 0.35, suggesting that PCR explains more variation in raw GDP than OLS. Model 4 produced a better model, with an RMSE of 8.27 and 49% of variation explained, further suggesting that log(GDP) is a more accurate predictor of life expectancy. The resulting Model 4 is plotted, showing the predicted and actual life expectancy.
+
+
+```{r Log-GDP-PCR-Plot,fig.height=3.5, echo=FALSE, message=FALSE, warning=FALSE}
+
+
+pcr_log <- pcr(y_train ~ ., data = Xlog_train, scale = TRUE, validation = "CV")
+
+
+rmsep_log <- RMSEP(pcr_log)
+best_ncomp_log <- which.min(rmsep_log$val[1,1,-1])
+
+pred_pcr_log <- predict(pcr_log, newdata = Xlog_test, ncomp = best_ncomp_log)
+pred_pcr_log <- as.numeric(pred_pcr_log)
+
+rmse_pcr_log <- sqrt(mean((y_test - pred_pcr_log)^2))
+r2_pcr_log <- 1 - sum((y_test - pred_pcr_log)^2) / sum((y_test - mean(y_test))^2)
+
+# Plot
+ggplot(data.frame(observed = y_test, predicted = pred_pcr_log, country = country_test),
+       aes(x = observed, y = predicted)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, colour = "red") +
+  geom_text(aes(label = country), size = 2, vjust = 1.5, check_overlap = TRUE) +
+  labs(title = paste("Observed vs Predicted Life Expectancy (2007) using PCR with log(GDP)",
+                     "\nComponents =", best_ncomp_log,
+                     ", RMSE =", round(rmse_pcr_log, 2),
+                     ", R² =", round(r2_pcr_log, 3)),
+       x = "Observed Life Expectancy (2007)",
+       y = "Predicted Life Expectancy (2007)") +
+  theme_minimal()
+
+```
+
+
+
+This plot shows the predictive performance of log(GDP) for life expectancy, with most countries lying close to the line of perfect prediction, indicating good agreement between observed and predicted values. This model achieved an $R^2$ of 0.49, suggesting that moderate explanatory power and that the reduced dimensionality improved predictive performance relative to OLS. However, several African countries are plotted far from this line, particularly Botswana, Equatorial Guinea, and Swaziland, indicating larger prediction errors. This suggests that the model is less accurate at predicting life expectancy in certain African countries, likely because additional factors beyond GDP are not captured, highlighting a key limitation of this modelling.
+
+Ridge regression addresses instability caused by multicollinearity and large coefficient variances, which can affect OLS models, by adding a penalty term proportional to the sum of squared coefficients. This achieved a substantial improvement in modelling, even with the raw GDP in Model 5, with an approximate RMSE of 9.09 and an $R^2$ value of 0.38. Greater improvements were observed when using log(GDP) as the predictor variable in Model 6, yielding an approximate RMSE of 7.78 and $R^2$ of 0.55. This produced the lowest RMSE and explained the highest variation (55%), making it the best-performing model overall.
+
+```{r Log-GDP-Ridge-Plot,fig.height=3.5, echo=FALSE, message=FALSE, warning=FALSE}
+
+xlog_train_mat <- as.matrix(Xlog_train)
+xlog_test_mat  <- as.matrix(Xlog_test)
+
+cv_ridge_log <- cv.glmnet(xlog_train_mat, y_train, alpha = 0)
+ridge_log <- glmnet(xlog_train_mat, y_train, alpha = 0, lambda = cv_ridge_log$lambda.min)
+
+pred_ridge_log <- predict(ridge_log, s = cv_ridge_log$lambda.min, newx = xlog_test_mat)
+
+rmse_ridge_log <- sqrt(mean((y_test - pred_ridge_log)^2))
+r2_ridge_log <- 1 - sum((y_test - pred_ridge_log)^2) / sum((y_test - mean(y_test))^2)
+
+# Plot
+ggplot(data.frame(observed = y_test, predicted = as.numeric(pred_ridge_log), country = country_test),
+       aes(x = observed, y = predicted)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, colour = "red") +
+  geom_text(aes(label = country), size = 2, vjust = 1.5, check_overlap = TRUE) +
+  labs(title = paste("Observed vs Predicted Life Expectancy (2007) using Ridge with log(GDP)",
+                     "\nRMSE =", round(rmse_ridge_log, 2),
+                     ", R² =", round(r2_ridge_log, 3)),
+       x = "Observed Life Expectancy (2007)",
+       y = "Predicted Life Expectancy (2007)") +
+  theme_minimal()
+
+```
+
+
+This plot shows that most countries are close to the line of perfect prediction, with countries more compactly clustered around it than in the PCR model, indicating improved agreement between observed and predicted values. The higher $R^2$ value indicated greater explanatory power and a better overall fit. However, the same few African countries were identified as deviating from this plot in the PCR modelling, further supporting the idea that not all variation in life expectancy is captured by GDP trends. 
+
+Overall, the best-performing models use log(GDP), indicating that this transformation improves predictive performance and better captures its relationship with life expectancy by reducing its large variance. The following table depicts this.
+
+```{r Model-Comparison-Table,fig.height=3.5, echo=FALSE, message=FALSE, warning=FALSE}
+
+# 1. Ordinary linear regression using raw GDP
+lm_raw <- lm(y_train ~ ., data = Xraw_train)
+
+pred_lm_raw <- predict(lm_raw, newdata = Xraw_test)
+
+rmse_lm_raw <- sqrt(mean((y_test - pred_lm_raw)^2))
+r2_lm_raw <- 1 - sum((y_test - pred_lm_raw)^2) / sum((y_test - mean(y_test))^2)
+
+
+# 2. Ordinary linear regression using log(GDP)
+lm_log <- lm(y_train ~ ., data = Xlog_train)
+
+pred_lm_log <- predict(lm_log, newdata = Xlog_test)
+
+rmse_lm_log <- sqrt(mean((y_test - pred_lm_log)^2))
+r2_lm_log <- 1 - sum((y_test - pred_lm_log)^2) / sum((y_test - mean(y_test))^2)
+
+
+# 3. Ridge regression using raw GDP
+xraw_train_mat <- as.matrix(Xraw_train)
+xraw_test_mat  <- as.matrix(Xraw_test)
+
+cv_ridge_raw <- cv.glmnet(xraw_train_mat, y_train, alpha = 0)
+ridge_raw <- glmnet(xraw_train_mat, y_train, alpha = 0, lambda = cv_ridge_raw$lambda.min)
+
+pred_ridge_raw <- predict(ridge_raw, s = cv_ridge_raw$lambda.min, newx = xraw_test_mat)
+
+rmse_ridge_raw <- sqrt(mean((y_test - pred_ridge_raw)^2))
+r2_ridge_raw <- 1 - sum((y_test - pred_ridge_raw)^2) / sum((y_test - mean(y_test))^2)
+
+
+
+# 4. Ridge regression using log(GDP)
+xlog_train_mat <- as.matrix(Xlog_train)
+xlog_test_mat  <- as.matrix(Xlog_test)
+
+cv_ridge_log <- cv.glmnet(xlog_train_mat, y_train, alpha = 0)
+ridge_log <- glmnet(xlog_train_mat, y_train, alpha = 0, lambda = cv_ridge_log$lambda.min)
+
+pred_ridge_log <- predict(ridge_log, s = cv_ridge_log$lambda.min, newx = xlog_test_mat)
+
+rmse_ridge_log <- sqrt(mean((y_test - pred_ridge_log)^2))
+r2_ridge_log <- 1 - sum((y_test - pred_ridge_log)^2) / sum((y_test - mean(y_test))^2)
+
+
+
+# 5. PCR using raw GDP
+pcr_raw <- pcr(y_train ~ ., data = Xraw_train, scale = TRUE, validation = "CV")
+
+rmsep_raw <- RMSEP(pcr_raw)
+best_ncomp_raw <- which.min(rmsep_raw$val[1,1,-1])
+
+pred_pcr_raw <- predict(pcr_raw, newdata = Xraw_test, ncomp = best_ncomp_raw)
+pred_pcr_raw <- as.numeric(pred_pcr_raw)
+
+rmse_pcr_raw <- sqrt(mean((y_test - pred_pcr_raw)^2))
+r2_pcr_raw <- 1 - sum((y_test - pred_pcr_raw)^2) / sum((y_test - mean(y_test))^2)
+
+
+
+# 6. PCR using log(GDP)
+pcr_log <- pcr(y_train ~ ., data = Xlog_train, scale = TRUE, validation = "CV")
+
+rmsep_log <- RMSEP(pcr_log)
+best_ncomp_log <- which.min(rmsep_log$val[1,1,-1])
+
+pred_pcr_log <- predict(pcr_log, newdata = Xlog_test, ncomp = best_ncomp_log)
+pred_pcr_log <- as.numeric(pred_pcr_log)
+
+rmse_pcr_log <- sqrt(mean((y_test - pred_pcr_log)^2))
+r2_pcr_log <- 1 - sum((y_test - pred_pcr_log)^2) / sum((y_test - mean(y_test))^2)
+
+
+
+# Final comparison table
+results <- data.frame(
+  Model = c("OLS raw GDP",
+            "OLS log(GDP)",
+            "PCR raw GDP",
+            "PCR log(GDP)",
+            "Ridge raw GDP",
+            "Ridge log(GDP)"),
+  RMSE = c(rmse_lm_raw,
+           rmse_lm_log,
+           rmse_pcr_raw,
+           rmse_pcr_log,
+           rmse_ridge_raw,
+           rmse_ridge_log),
+  R2 = c(r2_lm_raw,
+         r2_lm_log,
+         r2_pcr_raw,
+         r2_pcr_log,
+         r2_ridge_raw,
+         r2_ridge_log)
+)
+
+results <- results[order(results$RMSE), ]
+
+knitr::kable(
+  results,
+  digits = 3,
+  caption = "Comparison of regression models for predicting life expectancy in 2007"
+)
+
+```
+
+To conclude, across all models, GDP has consistently been a useful predictor of life expectancy, with higher GDP associated with higher life expectancy.  Both PCR and ridge regression improved the predictive accuracy of GDP by addressing multicollinearity in the predictors, with PCR using uncorrelated components and ridge regression adding a penalty term. The ridge model using log(GDP) proved the best model overall with the best balance of explanatory power and predictive accuracy, explaining approximately 55% of the variation within the data.  However, this maximum $R^2$ value highlights a limitation of the model: GDP could not fully explain or predict health outcomes, with reduced accuracy in certain countries identified.  
